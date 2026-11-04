@@ -41,14 +41,14 @@ $ structslop ./testdata/src/struct/p.go
 Sample output:
 
 ```text
-/go/src/github.com/orijtech/structslop/testdata/struct/p.go:30:9: struct has size 24 (size class 32), could be 16 (size class 16), you'll save 50.00% if you rearrange it to:
+p.go:30:9: struct has size 24 (size class 32), could be 16 (size class 16), you'll save 50.00% if you rearrange it to:
 struct {
 	y uint64
 	x uint32
 	z uint32
 }
 
-/go/src/github.com/orijtech/structslop/testdata/struct/p.go:36:9: struct has size 40 (size class 48), could be 24 (size class 32), you'll save 33.33% if you rearrange it to:
+p.go:36:9: struct has size 40 (size class 48), could be 24 (size class 32), you'll save 33.33% if you rearrange it to:
 struct {
 	_  [0]func()
 	i1 int
@@ -57,7 +57,7 @@ struct {
 	b  bool
 }
 
-/go/src/github.com/orijtech/structslop/testdata/struct/p.go:59:9: struct has size 40 (size class 48), could be 32 (size class 32), you'll save 33.33% if you rearrange it to:
+p.go:59:9: struct has size 40 (size class 48), could be 32 (size class 32), you'll save 33.33% if you rearrange it to:
 struct {
 	y uint64
 	t *httptest.Server
@@ -66,7 +66,7 @@ struct {
 	z uint32
 }
 
-/go/src/github.com/orijtech/structslop/testdata/struct/p.go:67:9: struct has size 40 (size class 48), could be 32 (size class 32), you'll save 33.33% if you rearrange it to:
+p.go:67:9: struct has size 40 (size class 48), could be 32 (size class 32), you'll save 33.33% if you rearrange it to:
 struct {
 	y uint64
 	t *s
@@ -113,9 +113,9 @@ However, you can still get this information when you want, using `-verbose` flag
 
 ```sh
 $ structslop -verbose ./testdata/src/verbose/p.go
-/go/src/github.com/orijtech/structslop/testdata/src/verbose/p.go:17:8: struct has size 0 (size class 0)
-/go/src/github.com/orijtech/structslop/testdata/src/verbose/p.go:19:9: struct has size 1 (size class 8)
-/go/src/github.com/orijtech/structslop/testdata/src/verbose/p.go:23:9: struct has size 32 (size class 32), could be 24 (size class 32), optimal fields order:
+p.go:17:8: struct has size 0 (size class 0)
+p.go:19:9: struct has size 1 (size class 8)
+p.go:23:9: struct has size 32 (size class 32), could be 24 (size class 32), optimal fields order:
 struct {
 	y uint64
 	z *s
@@ -128,9 +128,54 @@ struct {
 
 For applying suggested fix, use `-apply` flag, instead of `-fix`.
 
+### File names
+
+File names are printed relative to the directory given on the command line.
+For example, `structslop ./...` prints `pkg/foo/bar.go`, and
+`structslop ./pkg/...` prints `foo/bar.go`. With several directories, names
+are relative to their common parent. For import path arguments, names are
+relative to the working directory.
+
+### Summary table
+
+Use `-brief` to print one line per struct instead of the full report:
+
+```sh
+$ structslop -brief ./testdata/src/struct
+FILE     STRUCT  OLD SIZE  NEW SIZE  SAVINGS
+p.go:30  s3            24        16   33.33%
+p.go:36  s4            40        24   50.00%
+...
+```
+
+`OLD SIZE` and `NEW SIZE` are struct sizes in bytes. `SAVINGS` is computed from
+the runtime size classes, the same as in the full report.
+
+### Sorting
+
+Use `-sort` to sort the full report or the `-brief` table by one of
+`filename`, `structname`, `oldsize`, `newsize` or `percent`. Add a `-` prefix
+to sort in descending order. Ties keep file order.
+
+```sh
+$ structslop -brief -sort=-percent ./...
+```
+
+### Color
+
+`-color=auto` (the default) highlights the suggested struct layout when stdout
+is a terminal and `NO_COLOR` is not set. Use `-color=on` or `-color=off` to
+force it.
+
+### Exit status
+
+`0` when nothing is reported, `3` when at least one struct is reported, `1` on
+load or analysis errors and `2` on invalid flags. Reports are printed to
+stdout, errors to stderr.
+
 ## Development
 
-Go 1.20+
+Go 1.27+
 
 ### Running test
 

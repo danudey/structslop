@@ -78,3 +78,24 @@ func TestGenerated(t *testing.T) {
 	testdata := analysistest.TestData()
 	analysistest.Run(t, testdata, structslop.Analyzer, "generated")
 }
+
+func TestFindingNames(t *testing.T) {
+	testdata := analysistest.TestData()
+	results := analysistest.Run(t, testdata, structslop.Analyzer, "names")
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	res := results[0].Result.(*structslop.Result)
+	var got []string
+	for _, f := range res.Findings {
+		got = append(got, f.Name)
+	}
+	want := []string{"Named", "Outer.inner", "Outer.ptrs", "global", "T.method.<anonymous>", "fn.param"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("names = %q, want %q", got, want)
+	}
+	f := res.Findings[0]
+	if f.OldSize != 24 || f.NewSize != 16 || f.Savings < 33.3 || f.Savings > 33.4 {
+		t.Errorf("unexpected sizes for %s: %+v", f.Name, f)
+	}
+}

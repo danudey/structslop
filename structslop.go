@@ -24,6 +24,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -52,10 +53,48 @@ const Doc = `check for structs that can be rearrange fields to provide for maxim
 
 // Analyzer describes struct slop analysis function detector.
 var Analyzer = &analysis.Analyzer{
-	Name:     "structslop",
-	Doc:      Doc,
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
+	Name:       "structslop",
+	Doc:        Doc,
+	Requires:   []*analysis.Analyzer{inspect.Analyzer},
+	Run:        run,
+	ResultType: reflect.TypeOf((*Result)(nil)),
+}
+
+// Result is the result of running Analyzer on a package. It holds
+// one Finding per reported struct, in the order they were reported.
+type Result struct {
+	Findings []Finding
+}
+
+// Finding describes a single struct reported by Analyzer.
+type Finding struct {
+	Pos token.Pos // position of the struct type
+	End token.Pos
+
+	// Name identifies the struct, e.g. "T" for "type T struct{...}",
+	// "T.f" for a struct-typed field f of T, or "f.<anonymous>" for a
+	// struct literal inside function f.
+	Name string
+
+	OldSize      int64   // current size in bytes
+	NewSize      int64   // size in bytes after rearranging
+	OldSizeClass int64   // runtime allocation size class of OldSize
+	NewSizeClass int64   // runtime allocation size class of NewSize
+	Savings      float64 // percentage of memory saved, by size class
+
+	// Header is the first line of the diagnostic message.
+	Header string
+	// Optimal is the gofmt'd optimal field arrangement. It is empty
+	// when rearranging does not change the struct size.
+	Optimal string
+}
+
+// Message returns the diagnostic message for f.
+func (f Finding) Message() string {
+	if f.Optimal == "" {
+		return f.Header
+	}
+	return f.Header + "\n" + f.Optimal + "\n"
 }
 
 func run(pass *analysis.Pass) (interface{}, error) {
@@ -94,68 +133,73 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			}
 		}
 	}
-	inspect.Preorder(nodeFilter, func(n ast.Node) {
+	res := &Result{}
+	inspect.WithStack(nodeFilter, func(n ast.Node, push bool, stack []ast.Node) bool {
+		if !push {
+			return true
+		}
 		file := pass.Fset.File(n.Pos())
 		if strings.HasSuffix(file.Name(), "_test.go") && !includeTestFiles {
-			return
+			return false
 		}
 		// Skip generated structs if instructed.
 		if !generated && genFiles[file] {
-			return
+			return false
 		}
 		if f, ok := n.(*ast.File); ok {
 			af = f
 			df, _ = dec.DecorateFile(af)
-			return
+			return true
 		}
 		atyp := n.(*ast.StructType)
 		styp, ok := pass.TypesInfo.Types[atyp].Type.(*types.Struct)
 		// Type information may be incomplete.
 		if !ok {
-			return
+			return true
 		}
 		if !verbose && styp.NumFields() < 2 {
-			return
+			return true
 		}
 
 		r := checkSloppy(pass, styp)
 		if !verbose && !r.sloppy() {
-			return
+			return true
 		}
 
 		var buf bytes.Buffer
 		expr, err := parser.ParseExpr(formatStruct(r.optStruct, pass.Pkg.Path()))
 		if err != nil {
-			return
+			return true
 		}
 		if err := format.Node(&buf, token.NewFileSet(), expr.(*ast.StructType)); err != nil {
-			return
+			return true
 		}
 
-		var msg string
+		finding := Finding{
+			Pos:          n.Pos(),
+			End:          n.End(),
+			Name:         structName(stack),
+			OldSize:      r.oldGcSize,
+			NewSize:      r.newGcSize,
+			OldSizeClass: r.oldRuntimeSize,
+			NewSizeClass: r.newRuntimeSize,
+			Savings:      r.savings(),
+		}
 		switch {
 		case r.oldGcSize == r.newGcSize:
-			msg = fmt.Sprintf("struct has size %d (size class %d)", r.oldGcSize, r.oldRuntimeSize)
-		case r.oldGcSize != r.newGcSize:
-			msg = fmt.Sprintf(
-				"struct has size %d (size class %d), could be %d (size class %d), optimal fields order:\n%s\n",
-				r.oldGcSize,
-				r.oldRuntimeSize,
-				r.newGcSize,
-				r.newRuntimeSize,
-				buf.String(),
+			finding.Header = fmt.Sprintf("struct has size %d (size class %d)", r.oldGcSize, r.oldRuntimeSize)
+		case r.sloppy():
+			finding.Header = fmt.Sprintf(
+				"struct has size %d (size class %d), could be %d (size class %d), you'll save %.2f%% if you rearrange it to:",
+				r.oldGcSize, r.oldRuntimeSize, r.newGcSize, r.newRuntimeSize, r.savings(),
 			)
-			if r.sloppy() {
-				msg = fmt.Sprintf(
-					"struct has size %d (size class %d), could be %d (size class %d), you'll save %.2f%% if you rearrange it to:\n%s\n",
-					r.oldGcSize,
-					r.oldRuntimeSize,
-					r.newGcSize,
-					r.newRuntimeSize,
-					r.savings(),
-					buf.String(),
-				)
-			}
+			finding.Optimal = buf.String()
+		default:
+			finding.Header = fmt.Sprintf(
+				"struct has size %d (size class %d), could be %d (size class %d), optimal fields order:",
+				r.oldGcSize, r.oldRuntimeSize, r.newGcSize, r.newRuntimeSize,
+			)
+			finding.Optimal = buf.String()
 		}
 
 		dtyp := dec.Dst.Nodes[atyp].(*dst.StructType)
@@ -182,20 +226,22 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 		var suggested bytes.Buffer
 		if err := decorator.Fprint(&suggested, df); err != nil {
-			return
+			return true
 		}
 		pass.Report(analysis.Diagnostic{
 			Pos:            n.Pos(),
 			End:            n.End(),
-			Message:        msg,
+			Message:        finding.Message(),
 			SuggestedFixes: nil,
 		})
+		res.Findings = append(res.Findings, finding)
 		f := pass.Fset.File(n.Pos())
 		fileDiags[f.Name()] = suggested.Bytes()
+		return true
 	})
 
 	if !apply {
-		return nil, nil
+		return res, nil
 	}
 	for fn, content := range fileDiags {
 		fi, err := os.Open(fn)
@@ -213,7 +259,85 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			_, _ = fmt.Fprintf(os.Stderr, "failed to write suggested fix to file: %v", err)
 		}
 	}
-	return nil, nil
+	return res, nil
+}
+
+// structName derives a human-readable name for the struct type at the
+// top of stack (the innermost node), using its enclosing declarations.
+func structName(stack []ast.Node) string {
+	var parts []string
+	named := false
+	// Type wrappers that do not change which declaration the struct belongs to,
+	// e.g. "var x *struct{...}" or "f []struct{...}".
+	transparent := func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.StarExpr, *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.ParenExpr, *ast.Ellipsis:
+			return true
+		}
+		return false
+	}
+	immediate := true
+	for i := len(stack) - 2; i >= 0; i-- {
+		n := stack[i]
+		if immediate && transparent(n) {
+			continue
+		}
+		switch n := n.(type) {
+		case *ast.TypeSpec:
+			parts = append(parts, n.Name.Name)
+			named = named || immediate
+			return joinName(parts, named)
+		case *ast.Field:
+			if len(n.Names) > 0 {
+				parts = append(parts, n.Names[0].Name)
+				named = named || immediate
+			}
+		case *ast.ValueSpec:
+			if len(n.Names) > 0 {
+				parts = append(parts, n.Names[0].Name)
+				named = named || immediate
+			}
+		case *ast.FuncDecl:
+			name := n.Name.Name
+			if n.Recv != nil && len(n.Recv.List) > 0 {
+				name = recvTypeName(n.Recv.List[0].Type) + "." + name
+			}
+			parts = append(parts, name)
+			return joinName(parts, named)
+		}
+		immediate = false
+	}
+	return joinName(parts, named)
+}
+
+func joinName(parts []string, named bool) string {
+	if !named {
+		parts = append([]string{"<anonymous>"}, parts...)
+	}
+	// parts were collected innermost first.
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return strings.Join(parts, ".")
+}
+
+func recvTypeName(e ast.Expr) string {
+	for {
+		switch t := e.(type) {
+		case *ast.StarExpr:
+			e = t.X
+		case *ast.IndexExpr:
+			e = t.X
+		case *ast.IndexListExpr:
+			e = t.X
+		case *ast.ParenExpr:
+			e = t.X
+		case *ast.Ident:
+			return t.Name
+		default:
+			return "?"
+		}
+	}
 }
 
 type result struct {

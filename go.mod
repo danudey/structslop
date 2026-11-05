@@ -1,9 +1,9 @@
 module github.com/orijtech/structslop
 
-go 1.27.0
+go 1.27.3
 
 require (
-	github.com/dave/dst v0.27.2
+	github.com/dave/dst v0.28.0
 	golang.org/x/tools v0.52.0
 )
 

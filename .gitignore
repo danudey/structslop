@@ -10,6 +10,9 @@
 *.so
 *.dylib
 
+# Binary built with `go build ./cmd/structslop`
+/structslop
+
 # Test binary, built with `go test -c`
 *.test
 
